@@ -1,4 +1,5 @@
 import jnp
+import jax
 
 def attention(Q, K, V):
     ###
@@ -65,3 +66,59 @@ def multi_head_attention(x, params, num_heads):
     res = project(res, params["W_o"], params["b_o"])
 
     return res
+
+def feed_forward(x, params):
+
+    expanded_x = jnp.matmul(x, params["W_1"]) + params["b_1"]
+    act_expanded_x = jax.nn.relu(expanded_x)
+    act_x = jnp.matmul(act_expanded_x, params["W_2"]) + params["b_2"]
+
+    return act_x
+
+def transformer_block(x, all_params, num_heads):
+    multi_head_res = multi_head_attention(x, all_params["attention"], num_heads)
+
+    multi_head_res = layer_norm(x + multi_head_res)
+
+    ff_res = feed_forward(multi_head_res, all_params["ffn"])
+
+    ff_res = layer_norm(multi_head_res + ff_res)
+
+    return ff_res
+
+def positional_encoding(max_len, d_model):
+    pe = jnp.zeros((max_len, d_model))
+    position = jnp.arange(0, max_len).reshape(-1, 1)
+    div_idx = jnp.arange(0, d_model, 2)
+    div_term = jnp.exp(div_idx * -(jnp.log(10000.0) / d_model))
+
+    pe = pe.at[:, 0::2].set(jnp.sin(position * div_term))
+    
+    pe = pe.at[:, 1::2].set(jnp.cos(position * div_term))
+
+    return pe
+
+def encoder(input_tokens, params, max_len, num_heads):
+    # input_tokens: (Batch, Seq_Len) - Integers
+    
+    # 1. Embedding Lookup
+    # We assume params['embedding'] is a matrix of (vocab_size, d_model)
+    # JAX allows simple indexing: embeddings[indices]
+    x = params['embedding'][input_tokens] 
+    
+    # 2. Add Positional Encoding
+    d_model = x.shape[-1]
+    pe = positional_encoding(max_len, d_model)
+    
+    # Slice PE to matching length (handling batches with broadcasting)
+    seq_len = x.shape[1]
+    x = x + pe[:seq_len, :]
+    
+    # 3. Apply Dropout (Skipping for this simple inference version)
+    
+    # 4. Loop through Transformer Blocks
+    # params['layers'] is a list of dictionaries, one for each block
+    for layer_params in params['layers']:
+        x = transformer_block(x, layer_params, num_heads)
+        
+    return x
