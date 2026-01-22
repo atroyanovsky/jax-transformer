@@ -1,15 +1,81 @@
-import jnp
+import jax.numpy as jnp
 import jax
 
 class Transformer:
-    def __init__(self, num_heads, max_len, params):
+    def __init__(self, num_heads, max_len, d_model, vocab_size, num_layers, d_ff):
         self.num_heads = num_heads
         self.max_len = max_len
-        self.params = params
+        self.d_model = d_model
+        self.vocab_size = vocab_size
+        self.num_layers = num_layers
+        self.d_ff = d_ff
+    
+    def init_params(self, key):
+        """
+        Initialize all model parameters.
         
-        # Validate parameters during initialization
-        # Note: We'll need to infer these from params or require them as args
-        # For now, we'll skip validation in __init__ and let user call it explicitly
+        Args:
+            key: JAX random key
+            
+        Returns:
+            dict: Nested dictionary containing all model parameters
+        """
+        keys = jax.random.split(key, self.num_layers * 6 + 3)  # 6 per layer + embedding + classifier
+        key_idx = 0
+        
+        params = {}
+        
+        # Embedding matrix
+        params['embedding'] = jax.random.normal(keys[key_idx], (self.vocab_size, self.d_model))
+        key_idx += 1
+        
+        # Classifier head
+        params['W_vocab'] = jax.random.normal(keys[key_idx], (self.d_model, self.vocab_size))
+        key_idx += 1
+        params['b_vocab'] = jnp.zeros(self.vocab_size)
+        
+        # Transformer layers
+        params['layers'] = []
+        for i in range(self.num_layers):
+            layer_params = {}
+            
+            # Attention parameters
+            layer_params['attention'] = {
+                'W_q': jax.random.normal(keys[key_idx], (self.d_model, self.d_model)),
+                'b_q': jnp.zeros(self.d_model),
+                'W_k': jax.random.normal(keys[key_idx + 1], (self.d_model, self.d_model)),
+                'b_k': jnp.zeros(self.d_model),
+                'W_v': jax.random.normal(keys[key_idx + 2], (self.d_model, self.d_model)),
+                'b_v': jnp.zeros(self.d_model),
+                'W_o': jax.random.normal(keys[key_idx + 3], (self.d_model, self.d_model)),
+                'b_o': jnp.zeros(self.d_model),
+            }
+
+            layer_params['norm1'] = {
+                'gamma': jnp.ones(self.d_model),
+                'beta': jnp.zeros(self.d_model)
+            }
+            
+            key_idx += 4
+            
+            # Feed-forward parameters
+            layer_params['ffn'] = {
+                'W_1': jax.random.normal(keys[key_idx], (self.d_model, self.d_ff)),
+                'b_1': jnp.zeros(self.d_ff),
+                'W_2': jax.random.normal(keys[key_idx + 1], (self.d_ff, self.d_model)),
+                'b_2': jnp.zeros(self.d_model),
+            }
+
+            layer_params['norm2'] = {
+                'gamma': jnp.ones(self.d_model),
+                'beta': jnp.zeros(self.d_model)
+            }
+
+            key_idx += 2
+            
+            params['layers'].append(layer_params)
+        
+        return params
     
     def attention(self, Q, K, V):
         ###
@@ -28,7 +94,7 @@ class Transformer:
     def project(self, x, W, b):
         return jnp.matmul(x, W) + b
 
-    def layer_norm(self, x, eps=1e-6):
+    def layer_norm(self, x, params, eps=1e-6):
         ###
         ### x: Input matrix -> (batch_size, seq_len, d_k)
         ###
@@ -37,8 +103,11 @@ class Transformer:
 
         mu = jnp.mean(x, 2, keepdims=True)
         sigma = jnp.std(x, 2,keepdims=True)
+         
+        norm = (x - mu) / (sigma + eps)
 
-        return (x - mu) / (sigma + eps)
+
+        return norm * params['gamma'] + params['beta']
 
     def residual_block(self, x, layer_norm, sublayer):
         ###
@@ -88,11 +157,11 @@ class Transformer:
     def transformer_block(self, x, layer_params):
         multi_head_res = self.multi_head_attention(x, layer_params["attention"])
 
-        multi_head_res = self.layer_norm(x + multi_head_res)
+        multi_head_res = self.layer_norm(x + multi_head_res, layer_params["norm1"])
 
         ff_res = self.feed_forward(multi_head_res, layer_params["ffn"])
 
-        ff_res = self.layer_norm(multi_head_res + ff_res)
+        ff_res = self.layer_norm(multi_head_res + ff_res, layer_params["norm2"])
 
         return ff_res
 
@@ -108,13 +177,11 @@ class Transformer:
 
         return pe
 
-    def encoder(self, input_tokens):
+    def encoder(self, params, input_tokens):
         # input_tokens: (Batch, Seq_Len) - Integers
         
         # 1. Embedding Lookup
-        # We assume self.params['embedding'] is a matrix of (vocab_size, d_model)
-        # JAX allows simple indexing: embeddings[indices]
-        x = self.params['embedding'][input_tokens] 
+        x = params['embedding'][input_tokens] * jnp.sqrt(self.d_model)
         
         # 2. Add Positional Encoding
         d_model = x.shape[-1]
@@ -127,33 +194,30 @@ class Transformer:
         # 3. Apply Dropout (Skipping for this simple inference version)
         
         # 4. Loop through Transformer Blocks
-        # self.params['layers'] is a list of dictionaries, one for each block
-        for layer_params in self.params['layers']:
+        for layer_params in params['layers']:
             x = self.transformer_block(x, layer_params)
             
         return x
 
-    def classifier_head(self, x):
+    def classifier_head(self, params, x):
         # x: (Batch, Seq_Len, d_model)
         # W_vocab: (d_model, vocab_size)
         
         # 1. Project to Vocabulary size
-        logits = jnp.matmul(x, self.params['W_vocab']) + self.params['b_vocab']
+        logits = jnp.matmul(x, params['W_vocab']) + params['b_vocab']
         
         # 2. Convert to probabilities
-        probs = jax.nn.softmax(logits)
+        probs = jax.nn.log_softmax(logits)
         
         return probs
     
-    def validate_params(self, d_model, vocab_size, num_layers, d_ff):
+    def validate_params(self, params):
         """
         Validate that all parameters have the correct dimensions.
+        Uses instance config values for expected dimensions.
         
         Args:
-            d_model: Model dimension
-            vocab_size: Vocabulary size
-            num_layers: Number of transformer layers
-            d_ff: Feed-forward network dimension
+            params: Parameter dictionary to validate
         
         Returns:
             bool: True if all dimensions are correct
@@ -161,59 +225,98 @@ class Transformer:
         """
         try:
             # Check embedding matrix
-            if 'embedding' not in self.params:
+            if 'embedding' not in params:
                 return False, "Missing embedding matrix"
-            if self.params['embedding'].shape != (vocab_size, d_model):
-                return False, f"Embedding shape: expected ({vocab_size}, {d_model}), got {self.params['embedding'].shape}"
+            if params['embedding'].shape != (self.vocab_size, self.d_model):
+                return False, f"Embedding shape: expected ({self.vocab_size}, {self.d_model}), got {params['embedding'].shape}"
             
             # Check classifier head
-            if 'W_vocab' not in self.params or 'b_vocab' not in self.params:
+            if 'W_vocab' not in params or 'b_vocab' not in params:
                 return False, "Missing classifier head parameters"
-            if self.params['W_vocab'].shape != (d_model, vocab_size):
-                return False, f"W_vocab shape: expected ({d_model}, {vocab_size}), got {self.params['W_vocab'].shape}"
-            if self.params['b_vocab'].shape != (vocab_size,):
-                return False, f"b_vocab shape: expected ({vocab_size},), got {self.params['b_vocab'].shape}"
+            if params['W_vocab'].shape != (self.d_model, self.vocab_size):
+                return False, f"W_vocab shape: expected ({self.d_model}, {self.vocab_size}), got {params['W_vocab'].shape}"
+            if params['b_vocab'].shape != (self.vocab_size,):
+                return False, f"b_vocab shape: expected ({self.vocab_size},), got {params['b_vocab'].shape}"
             
             # Check layers
-            if 'layers' not in self.params:
+            if 'layers' not in params:
                 return False, "Missing layers parameter"
-            if len(self.params['layers']) != num_layers:
-                return False, f"Number of layers: expected {num_layers}, got {len(self.params['layers'])}"
+            if len(params['layers']) != self.num_layers:
+                return False, f"Number of layers: expected {self.num_layers}, got {len(params['layers'])}"
             
             # Check each layer
-            for i, layer_params in enumerate(self.params['layers']):
+            for i, layer_params in enumerate(params['layers']):
                 # Check attention parameters
                 attention_params = layer_params.get('attention', {})
                 for param_name in ['W_q', 'W_k', 'W_v', 'W_o']:
                     if param_name not in attention_params:
                         return False, f"Layer {i}: Missing {param_name} in attention"
-                    expected_shape = (d_model, d_model)
+                    expected_shape = (self.d_model, self.d_model)
                     if attention_params[param_name].shape != expected_shape:
                         return False, f"Layer {i}: {param_name} shape: expected {expected_shape}, got {attention_params[param_name].shape}"
                 
                 for param_name in ['b_q', 'b_k', 'b_v', 'b_o']:
                     if param_name not in attention_params:
                         return False, f"Layer {i}: Missing {param_name} in attention"
-                    if attention_params[param_name].shape != (d_model,):
-                        return False, f"Layer {i}: {param_name} shape: expected ({d_model},), got {attention_params[param_name].shape}"
+                    if attention_params[param_name].shape != (self.d_model,):
+                        return False, f"Layer {i}: {param_name} shape: expected ({self.d_model},), got {attention_params[param_name].shape}"
                 
                 # Check feed-forward parameters
                 ffn_params = layer_params.get('ffn', {})
                 for param_name in ['W_1', 'W_2']:
                     if param_name not in ffn_params:
                         return False, f"Layer {i}: Missing {param_name} in feed-forward"
-                    expected_shape = (d_model, d_ff) if param_name == 'W_1' else (d_ff, d_model)
+                    expected_shape = (self.d_model, self.d_ff) if param_name == 'W_1' else (self.d_ff, self.d_model)
                     if ffn_params[param_name].shape != expected_shape:
                         return False, f"Layer {i}: {param_name} shape: expected {expected_shape}, got {ffn_params[param_name].shape}"
                 
                 for param_name in ['b_1', 'b_2']:
                     if param_name not in ffn_params:
                         return False, f"Layer {i}: Missing {param_name} in feed-forward"
-                    expected_shape = (d_ff,) if param_name == 'b_1' else (d_model,)
+                    expected_shape = (self.d_ff,) if param_name == 'b_1' else (self.d_model,)
                     if ffn_params[param_name].shape != expected_shape:
                         return False, f"Layer {i}: {param_name} shape: expected {expected_shape}, got {ffn_params[param_name].shape}"
+                
+                # Check layer normalization parameters
+                for norm_name in ['norm1', 'norm2']:
+                    norm_params = layer_params.get(norm_name, {})
+                    for param_name in ['gamma', 'beta']:
+                        if param_name not in norm_params:
+                            return False, f"Layer {i}: Missing {param_name} in {norm_name}"
+                        if norm_params[param_name].shape != (self.d_model,):
+                            return False, f"Layer {i}: {norm_name} {param_name} shape: expected ({self.d_model},), got {norm_params[param_name].shape}"
             
             return True, "All parameter dimensions are correct"
             
         except Exception as e:
             return False, f"Error during validation: {str(e)}"
+
+
+def loss_fn(params, model, inputs, targets):
+    """
+    Compute cross-entropy loss for language modeling.
+    
+    Args:
+        params: Model parameters
+        model: Transformer instance
+        inputs: Input token sequences (batch_size, seq_len)
+        targets: Target token sequences (batch_size, seq_len)
+    
+    Returns:
+        float: Cross-entropy loss
+    """
+    # Forward pass
+    logits = model.encoder(params, inputs)
+    log_probs = model.classifier_head(params, logits)
+    
+    # Compute cross-entropy loss
+    # targets are the true next tokens
+    batch_size, seq_len, vocab_size = log_probs.shape
+    
+    # Gather log probabilities for target tokens
+    target_log_probs = jnp.take_along_axis(log_probs, targets[..., None], axis=-1)
+    
+    # Average over batch and sequence length
+    loss = -jnp.mean(target_log_probs)
+    
+    return loss
