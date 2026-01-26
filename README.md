@@ -1,6 +1,7 @@
 # JAX Transformer
 
 An object-oriented implementation of a Transformer model using JAX. This project is for self-educational purposes.
+Currently the transformer is an encoder-only and the training loop is a copy task.
 
 ## Project Structure
 

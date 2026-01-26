@@ -25,44 +25,50 @@ class Transformer:
         self.num_layers = num_layers
         self.d_ff = d_ff
     
+    def _xavier_he(self, key, shape):
+        """Xavier/He initialization: std = sqrt(2 / fan_in)."""
+        fan_in = shape[0]
+        std = jnp.sqrt(2.0 / fan_in)
+        return jax.random.normal(key, shape) * std
+
     def init_params(self, key):
         """
-        Initialize all model parameters.
-        
+        Initialize all model parameters using He initialization.
+
         Args:
             key: JAX random key
-            
+
         Returns:
             dict: Nested dictionary containing all model parameters
         """
-        keys = jax.random.split(key, self.num_layers * 6 + 3)  # 6 per layer + embedding + classifier
+        keys = jax.random.split(key, self.num_layers * 6 + 3)
         key_idx = 0
-        
+
         params = {}
-        
+
         # Embedding matrix
-        params['embedding'] = jax.random.normal(keys[key_idx], (self.vocab_size, self.d_model))
+        params['embedding'] = self._xavier_he(keys[key_idx], (self.vocab_size, self.d_model))
         key_idx += 1
-        
+
         # Classifier head
-        params['W_vocab'] = jax.random.normal(keys[key_idx], (self.d_model, self.vocab_size))
+        params['W_vocab'] = self._xavier_he(keys[key_idx], (self.d_model, self.vocab_size))
         key_idx += 1
         params['b_vocab'] = jnp.zeros(self.vocab_size)
-        
+
         # Transformer layers
         params['layers'] = []
         for i in range(self.num_layers):
             layer_params = {}
-            
+
             # Attention parameters
             layer_params['attention'] = {
-                'W_q': jax.random.normal(keys[key_idx], (self.d_model, self.d_model)),
+                'W_q': self._xavier_he(keys[key_idx], (self.d_model, self.d_model)),
                 'b_q': jnp.zeros(self.d_model),
-                'W_k': jax.random.normal(keys[key_idx + 1], (self.d_model, self.d_model)),
+                'W_k': self._xavier_he(keys[key_idx + 1], (self.d_model, self.d_model)),
                 'b_k': jnp.zeros(self.d_model),
-                'W_v': jax.random.normal(keys[key_idx + 2], (self.d_model, self.d_model)),
+                'W_v': self._xavier_he(keys[key_idx + 2], (self.d_model, self.d_model)),
                 'b_v': jnp.zeros(self.d_model),
-                'W_o': jax.random.normal(keys[key_idx + 3], (self.d_model, self.d_model)),
+                'W_o': self._xavier_he(keys[key_idx + 3], (self.d_model, self.d_model)),
                 'b_o': jnp.zeros(self.d_model),
             }
 
@@ -70,14 +76,14 @@ class Transformer:
                 'gamma': jnp.ones(self.d_model),
                 'beta': jnp.zeros(self.d_model)
             }
-            
+
             key_idx += 4
-            
+
             # Feed-forward parameters
             layer_params['ffn'] = {
-                'W_1': jax.random.normal(keys[key_idx], (self.d_model, self.d_ff)),
+                'W_1': self._xavier_he(keys[key_idx], (self.d_model, self.d_ff)),
                 'b_1': jnp.zeros(self.d_ff),
-                'W_2': jax.random.normal(keys[key_idx + 1], (self.d_ff, self.d_model)),
+                'W_2': self._xavier_he(keys[key_idx + 1], (self.d_ff, self.d_model)),
                 'b_2': jnp.zeros(self.d_model),
             }
 
