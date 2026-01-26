@@ -42,6 +42,8 @@ jax-transformer/
 uv sync
 ```
 
+This installs all dependencies including dev dependencies (pytest).
+
 ### Training
 
 ```bash
@@ -115,5 +117,5 @@ logits = model.classifier_head(params, output)
 Run tests with:
 
 ```bash
-pytest tests/
+uv run pytest
 ```
