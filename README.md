@@ -1,6 +1,6 @@
 # JAX Transformer
 
-A clean, object-oriented implementation of a Transformer model using JAX. This project is for self-educational purposes.
+An object-oriented implementation of a Transformer model using JAX. This project is for self-educational purposes.
 
 ## Project Structure
 
