@@ -1,7 +1,22 @@
+"""
+Transformer model implementation in JAX.
+
+This is a encoder-only transformer trained on a sequence copy task,
+where the model learns to reproduce its input.
+"""
+
 import jax.numpy as jnp
 import jax
 
+
 class Transformer:
+    """
+    Stateless Transformer model following JAX idioms.
+
+    The class stores only configuration; all parameters are passed
+    explicitly to methods for JAX compatibility.
+    """
+
     def __init__(self, num_heads, max_len, d_model, vocab_size, num_layers, d_ff):
         self.num_heads = num_heads
         self.max_len = max_len
@@ -78,58 +93,89 @@ class Transformer:
         return params
     
     def attention(self, Q, K, V):
-        ###
-        ### Q: Query matrix -> (batch_size, num_heads, seq_len, d_k)
-        ###
-        ### K: Key matrix -> (batch_size, num_heads, seq_len, d_k)
-        ###
-        ### V: Value matrix -> (batch_size, num_heads, seq_len, d_k)
-        ###
-        ### d_k: len feature vector for a specific word
+        """
+        Scaled dot-product attention.
+
+        Args:
+            Q: Query matrix (batch, num_heads, seq_len, d_k)
+            K: Key matrix (batch, num_heads, seq_len, d_k)
+            V: Value matrix (batch, num_heads, seq_len, d_k)
+
+        Returns:
+            Attention output (batch, num_heads, seq_len, d_k)
+        """
         d_k = Q.shape[-1]
-        scores = jnp.matmul(Q, jnp.swapaxes(K, -2,-1)) / jnp.sqrt(d_k) # -> (batch_size, num_heads, seq_len, seq_len)
+        scores = jnp.matmul(Q, jnp.swapaxes(K, -2, -1)) / jnp.sqrt(d_k)
         probabilities = jax.nn.softmax(scores)
-        return jnp.matmul(probabilities, V) # -> (batch_size, num_heads, seq_len, d_k)
+        return jnp.matmul(probabilities, V)
 
     def project(self, x, W, b):
+        """Linear projection: x @ W + b."""
         return jnp.matmul(x, W) + b
 
     def layer_norm(self, x, params, eps=1e-6):
-        ###
-        ### x: Input matrix -> (batch_size, seq_len, d_k)
-        ###
-        ### eps: Numerical stability for sigma
-        ###
+        """
+        Layer normalization with learnable scale and shift.
 
+        Args:
+            x: Input (batch, seq_len, d_model)
+            params: Dict with 'gamma' and 'beta'
+            eps: Small constant for numerical stability
+
+        Returns:
+            Normalized output (batch, seq_len, d_model)
+        """
         mu = jnp.mean(x, 2, keepdims=True)
-        sigma = jnp.std(x, 2,keepdims=True)
-         
+        sigma = jnp.std(x, 2, keepdims=True)
         norm = (x - mu) / (sigma + eps)
-
-
         return norm * params['gamma'] + params['beta']
 
     def residual_block(self, x, layer_norm, sublayer):
-        ###
-        ### x: Input matrix -> (batch_size, seq_len, d_k)
-        ### layer_norm: layer norm function
-        ### sublayer: sublayer func (attention func)
+        """Apply sublayer with residual connection: layer_norm(x + sublayer(x))."""
         return layer_norm(x + sublayer(x))
 
     def split_heads(self, x, num_heads):
+        """
+        Split the last dimension into (num_heads, depth) and transpose.
+
+        Args:
+            x: Input (batch, seq_len, d_model)
+            num_heads: Number of attention heads
+
+        Returns:
+            Split tensor (batch, num_heads, seq_len, depth)
+        """
         head_depth = x.shape[-1] // num_heads
         split_head_vals = jnp.reshape(x, x.shape[:2] + (num_heads, head_depth))
-        split_head_vals = split_head_vals.swapaxes(1, 2)
-        return split_head_vals
+        return split_head_vals.swapaxes(1, 2)
 
-    def merge_heads(self, split_heads):
-        ### split_heads -> (Batch, Heads, Seq_Len, Depth)
-        split_heads = split_heads.swapaxes(1, 2)
-        merged_heads = jnp.reshape(split_heads, (split_heads.shape[0], split_heads.shape[1], -1))
+    def merge_heads(self, x):
+        """
+        Inverse of split_heads: merge attention heads back together.
 
-        return merged_heads
+        Args:
+            x: Split tensor (batch, num_heads, seq_len, depth)
+
+        Returns:
+            Merged tensor (batch, seq_len, d_model)
+        """
+        x = x.swapaxes(1, 2)
+        return jnp.reshape(x, (x.shape[0], x.shape[1], -1))
 
     def multi_head_attention(self, x, attention_params):
+        """
+        Multi-head self-attention.
+
+        Projects input to Q, K, V, splits into heads, applies attention,
+        merges heads, and projects output.
+
+        Args:
+            x: Input (batch, seq_len, d_model)
+            attention_params: Dict with W_q, W_k, W_v, W_o and biases
+
+        Returns:
+            Attention output (batch, seq_len, d_model)
+        """
         Q = self.project(x, attention_params["W_q"], attention_params["b_q"])
         K = self.project(x, attention_params["W_k"], attention_params["b_k"])
         V = self.project(x, attention_params["W_v"], attention_params["b_v"])
@@ -139,77 +185,97 @@ class Transformer:
         V = self.split_heads(V, num_heads=self.num_heads)
 
         res = self.attention(Q, K, V)
-
         res = self.merge_heads(res)
-
         res = self.project(res, attention_params["W_o"], attention_params["b_o"])
-
         return res
 
     def feed_forward(self, x, ffn_params):
+        """
+        Position-wise feed-forward network: two linear layers with ReLU.
 
-        expanded_x = jnp.matmul(x, ffn_params["W_1"]) + ffn_params["b_1"]
-        act_expanded_x = jax.nn.relu(expanded_x)
-        act_x = jnp.matmul(act_expanded_x, ffn_params["W_2"]) + ffn_params["b_2"]
+        Args:
+            x: Input (batch, seq_len, d_model)
+            ffn_params: Dict with W_1, b_1, W_2, b_2
 
-        return act_x
+        Returns:
+            Output (batch, seq_len, d_model)
+        """
+        hidden = jax.nn.relu(jnp.matmul(x, ffn_params["W_1"]) + ffn_params["b_1"])
+        return jnp.matmul(hidden, ffn_params["W_2"]) + ffn_params["b_2"]
 
     def transformer_block(self, x, layer_params):
-        multi_head_res = self.multi_head_attention(x, layer_params["attention"])
+        """
+        Single transformer block: attention + FFN, each with residual and layer norm.
 
-        multi_head_res = self.layer_norm(x + multi_head_res, layer_params["norm1"])
+        Args:
+            x: Input (batch, seq_len, d_model)
+            layer_params: Dict with attention, ffn, norm1, norm2 params
 
-        ff_res = self.feed_forward(multi_head_res, layer_params["ffn"])
+        Returns:
+            Output (batch, seq_len, d_model)
+        """
+        attn_out = self.multi_head_attention(x, layer_params["attention"])
+        x = self.layer_norm(x + attn_out, layer_params["norm1"])
 
-        ff_res = self.layer_norm(multi_head_res + ff_res, layer_params["norm2"])
-
-        return ff_res
+        ff_out = self.feed_forward(x, layer_params["ffn"])
+        x = self.layer_norm(x + ff_out, layer_params["norm2"])
+        return x
 
     def positional_encoding(self, max_len, d_model):
+        """
+        Generate sinusoidal positional encodings.
+
+        Args:
+            max_len: Maximum sequence length
+            d_model: Model dimension
+
+        Returns:
+            Positional encoding matrix (max_len, d_model)
+        """
         pe = jnp.zeros((max_len, d_model))
         position = jnp.arange(0, max_len).reshape(-1, 1)
         div_idx = jnp.arange(0, d_model, 2)
         div_term = jnp.exp(div_idx * -(jnp.log(10000.0) / d_model))
 
         pe = pe.at[:, 0::2].set(jnp.sin(position * div_term))
-        
         pe = pe.at[:, 1::2].set(jnp.cos(position * div_term))
-
         return pe
 
     def encoder(self, params, input_tokens):
-        # input_tokens: (Batch, Seq_Len) - Integers
-        
-        # 1. Embedding Lookup
+        """
+        Full encoder forward pass.
+
+        Args:
+            params: Model parameters dict
+            input_tokens: Token IDs (batch, seq_len)
+
+        Returns:
+            Encoded representations (batch, seq_len, d_model)
+        """
         x = params['embedding'][input_tokens] * jnp.sqrt(self.d_model)
-        
-        # 2. Add Positional Encoding
-        d_model = x.shape[-1]
-        pe = self.positional_encoding(self.max_len, d_model)
-        
-        # Slice PE to matching length (handling batches with broadcasting)
+
+        pe = self.positional_encoding(self.max_len, self.d_model)
         seq_len = x.shape[1]
         x = x + pe[:seq_len, :]
-        
-        # 3. Apply Dropout (Skipping for this simple inference version)
-        
-        # 4. Loop through Transformer Blocks
+
         for layer_params in params['layers']:
             x = self.transformer_block(x, layer_params)
-            
+
         return x
 
     def classifier_head(self, params, x):
-        # x: (Batch, Seq_Len, d_model)
-        # W_vocab: (d_model, vocab_size)
-        
-        # 1. Project to Vocabulary size
+        """
+        Project encoder output to vocabulary log-probabilities.
+
+        Args:
+            params: Model parameters dict
+            x: Encoder output (batch, seq_len, d_model)
+
+        Returns:
+            Log-probabilities over vocabulary (batch, seq_len, vocab_size)
+        """
         logits = jnp.matmul(x, params['W_vocab']) + params['b_vocab']
-        
-        # 2. Convert to probabilities
-        probs = jax.nn.log_softmax(logits)
-        
-        return probs
+        return jax.nn.log_softmax(logits)
     
     def validate_params(self, params):
         """
@@ -294,29 +360,18 @@ class Transformer:
 
 def loss_fn(params, model, inputs, targets):
     """
-    Compute cross-entropy loss for language modeling.
-    
+    Compute cross-entropy loss for the copy task.
+
     Args:
         params: Model parameters
         model: Transformer instance
-        inputs: Input token sequences (batch_size, seq_len)
-        targets: Target token sequences (batch_size, seq_len)
-    
+        inputs: Input token IDs (batch, seq_len)
+        targets: Target token IDs (batch, seq_len)
+
     Returns:
-        float: Cross-entropy loss
+        Scalar cross-entropy loss
     """
-    # Forward pass
-    logits = model.encoder(params, inputs)
-    log_probs = model.classifier_head(params, logits)
-    
-    # Compute cross-entropy loss
-    # targets are the true next tokens
-    batch_size, seq_len, vocab_size = log_probs.shape
-    
-    # Gather log probabilities for target tokens
+    features = model.encoder(params, inputs)
+    log_probs = model.classifier_head(params, features)
     target_log_probs = jnp.take_along_axis(log_probs, targets[..., None], axis=-1)
-    
-    # Average over batch and sequence length
-    loss = -jnp.mean(target_log_probs)
-    
-    return loss
+    return -jnp.mean(target_log_probs)

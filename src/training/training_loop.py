@@ -1,5 +1,5 @@
 import jax
-from transformer import Transformer
+from ..models.transformer import Transformer
 import jax.numpy as jnp
 import optax
 
