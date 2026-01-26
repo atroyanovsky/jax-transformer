@@ -21,13 +21,13 @@ def get_batch(key, batch_size, seq_len, vocab_size):
 # A. Configuration
 VOCAB_SIZE = 50      # Small vocab
 D_MODEL = 128        # Feature vector size
-NUM_LAYERS = 2
+NUM_LAYERS = 5
 NUM_HEADS = 4
 D_FF = 256
 BATCH_SIZE = 32
 SEQ_LEN = 15
 MAX_LEN = 50
-STEPS = 1000
+STEPS = 6000
 LR = 1e-3
 
 # B. Initialization
