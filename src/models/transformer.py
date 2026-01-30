@@ -5,6 +5,7 @@ This is a encoder-only transformer trained on a sequence copy task,
 where the model learns to reproduce its input.
 """
 
+from re import S
 import jax.numpy as jnp
 import jax
 
@@ -98,7 +99,7 @@ class Transformer:
         
         return params
     
-    def attention(self, Q, K, V):
+    def attention(self, Q, K, V, mask):
         """
         Scaled dot-product attention.
 
@@ -112,7 +113,12 @@ class Transformer:
         """
         d_k = Q.shape[-1]
         scores = jnp.matmul(Q, jnp.swapaxes(K, -2, -1)) / jnp.sqrt(d_k)
+
+        if mask is not None:
+            scores += mask
+
         probabilities = jax.nn.softmax(scores)
+
         return jnp.matmul(probabilities, V)
 
     def project(self, x, W, b):
@@ -168,7 +174,7 @@ class Transformer:
         x = x.swapaxes(1, 2)
         return jnp.reshape(x, (x.shape[0], x.shape[1], -1))
 
-    def multi_head_attention(self, x, attention_params):
+    def multi_head_attention(self, x, attention_params, mask):
         """
         Multi-head self-attention.
 
@@ -190,7 +196,7 @@ class Transformer:
         K = self.split_heads(K, num_heads=self.num_heads)
         V = self.split_heads(V, num_heads=self.num_heads)
 
-        res = self.attention(Q, K, V)
+        res = self.attention(Q, K, V, mask)
         res = self.merge_heads(res)
         res = self.project(res, attention_params["W_o"], attention_params["b_o"])
         return res
@@ -209,7 +215,7 @@ class Transformer:
         hidden = jax.nn.relu(jnp.matmul(x, ffn_params["W_1"]) + ffn_params["b_1"])
         return jnp.matmul(hidden, ffn_params["W_2"]) + ffn_params["b_2"]
 
-    def transformer_block(self, x, layer_params):
+    def transformer_block(self, x, layer_params, mask=None):
         """
         Single transformer block: attention + FFN, each with residual and layer norm.
 
@@ -220,7 +226,7 @@ class Transformer:
         Returns:
             Output (batch, seq_len, d_model)
         """
-        attn_out = self.multi_head_attention(x, layer_params["attention"])
+        attn_out = self.multi_head_attention(x, layer_params["attention"], mask)
         x = self.layer_norm(x + attn_out, layer_params["norm1"])
 
         ff_out = self.feed_forward(x, layer_params["ffn"])
@@ -363,21 +369,67 @@ class Transformer:
         except Exception as e:
             return False, f"Error during validation: {str(e)}"
 
+    def forward(self, params, input_tokens):
+        # Input:
 
-def loss_fn(params, model, inputs, targets):
-    """
-    Compute cross-entropy loss for the copy task.
+        # params: Your dictionary of weights.
 
-    Args:
-        params: Model parameters
-        model: Transformer instance
-        inputs: Input token IDs (batch, seq_len)
-        targets: Target token IDs (batch, seq_len)
+        # x: A batch of integer token IDs. Shape: (Batch_Size, Seq_Len).
 
-    Returns:
-        Scalar cross-entropy loss
-    """
-    features = model.encoder(params, inputs)
-    log_probs = model.classifier_head(params, features)
-    target_log_probs = jnp.take_along_axis(log_probs, targets[..., None], axis=-1)
-    return -jnp.mean(target_log_probs)
+        # Output:
+
+        # logits: Unnormalized scores for the next token. Shape: (Batch_Size, Seq_Len, Vocab_Size).
+
+        x = params['embedding'][input_tokens] * jnp.sqrt(self.d_model)
+
+        pe = self.positional_encoding(self.max_len, self.d_model)
+        seq_len = x.shape[1]
+        x = x + pe[:seq_len, :]
+
+        causal_mask = self.make_causal_mask(seq_len)
+
+        for layer_params in params['layers']:
+            x = self.transformer_block(x, layer_params, causal_mask)
+
+        logits = jnp.matmul(x, params['W_vocab']) + params['b_vocab']
+        return logits
+    
+    def make_causal_mask(self, seq_len):
+        
+        mask = jnp.ones((seq_len, seq_len))
+        mask = jnp.triu(mask, k=1)
+        mask *= -1e9
+        return mask
+
+
+    def generate(self, params, inputs, max_new_tokens, temperature=1.0, key=None):
+        # We need a random key for sampling!
+        if key is None:
+            key = jax.random.PRNGKey(42)
+            
+        for _ in range(max_new_tokens):
+            # 1. Crop Context
+            inputs_cond = inputs
+            if inputs.shape[1] > self.max_len:
+                inputs_cond = inputs[:, -self.max_len:]
+            
+            # 2. Forward Pass
+            logits = self.forward(params, inputs_cond)
+            # Focus on the last token: (Batch, Vocab)
+            logits = logits[:, -1, :]
+            
+            # 3. Apply Temperature
+            # Higher T (e.g. 1.0) = More creative/random
+            # Lower T (e.g. 0.1) = More confident/conservative
+            logits = logits / temperature
+            
+            # 4. Sample instead of Argmax
+            key, subkey = jax.random.split(key)
+            # jax.random.categorical expects unnormalized logits (no softmax needed)
+            next_token = jax.random.categorical(subkey, logits, axis=-1)
+            
+            # 5. Append
+            next_token = next_token.reshape(1, 1)
+            inputs = jnp.concatenate([inputs, next_token], axis=1)
+            
+        return inputs

@@ -38,3 +38,29 @@ def get_batch(key, batch_size, seq_len, vocab_size):
     """
     data = jax.random.randint(key, (batch_size, seq_len), 0, vocab_size)
     return data, data
+
+def get_batch_autoregressive(key, batch_size, seq_len, vocab_size):
+    """
+    Generate a random batch for Next-Token Prediction.
+    
+    Returns:
+        inputs: Sequence [0...N-1]
+        targets: Sequence [1...N]
+    """
+    # Generate slightly longer sequence (seq_len + 1)
+    data = jax.random.randint(key, (batch_size, seq_len + 1), 0, vocab_size)
+    
+    # Inputs: Everything except the last token
+    inputs = data[:, :-1]
+    
+    # Targets: Everything except the first token (Shifted right)
+    targets = data[:, 1:]
+    
+    return inputs, targets
+
+def loss_fn_decoder(params, model, inputs, targets):
+    logits = model.forward(params, inputs)
+    log_probs = jax.nn.log_softmax(logits)
+    target_log_probs = jnp.take_along_axis(log_probs, targets[..., None], axis=-1)
+    
+    return -jnp.mean(target_log_probs)
