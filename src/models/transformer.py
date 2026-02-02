@@ -18,13 +18,14 @@ class Transformer:
     explicitly to methods for JAX compatibility.
     """
 
-    def __init__(self, num_heads, max_len, d_model, vocab_size, num_layers, d_ff):
+    def __init__(self, num_heads, max_len, d_model, vocab_size, num_layers, d_ff, dropout_rate):
         self.num_heads = num_heads
         self.max_len = max_len
         self.d_model = d_model
         self.vocab_size = vocab_size
         self.num_layers = num_layers
         self.d_ff = d_ff
+        self.dropout_rate = dropout_rate
     
     def _xavier_he(self, key, shape):
         """Xavier/He initialization: std = sqrt(2 / fan_in)."""
@@ -99,7 +100,7 @@ class Transformer:
         
         return params
     
-    def attention(self, Q, K, V, mask):
+    def attention(self, Q, K, V, mask, key, training):
         """
         Scaled dot-product attention.
 
@@ -118,6 +119,9 @@ class Transformer:
             scores += mask
 
         probabilities = jax.nn.softmax(scores)
+
+        if self.dropout_rate > 0 and training:
+            probabilities = self.dropout(probabilities, key)
 
         return jnp.matmul(probabilities, V)
 
@@ -174,7 +178,7 @@ class Transformer:
         x = x.swapaxes(1, 2)
         return jnp.reshape(x, (x.shape[0], x.shape[1], -1))
 
-    def multi_head_attention(self, x, attention_params, mask):
+    def multi_head_attention(self, x, attention_params, mask, key, training):
         """
         Multi-head self-attention.
 
@@ -196,7 +200,7 @@ class Transformer:
         K = self.split_heads(K, num_heads=self.num_heads)
         V = self.split_heads(V, num_heads=self.num_heads)
 
-        res = self.attention(Q, K, V, mask)
+        res = self.attention(Q, K, V, mask, key, training)
         res = self.merge_heads(res)
         res = self.project(res, attention_params["W_o"], attention_params["b_o"])
         return res
@@ -215,7 +219,7 @@ class Transformer:
         hidden = jax.nn.relu(jnp.matmul(x, ffn_params["W_1"]) + ffn_params["b_1"])
         return jnp.matmul(hidden, ffn_params["W_2"]) + ffn_params["b_2"]
 
-    def transformer_block(self, x, layer_params, mask=None):
+    def transformer_block(self, x, layer_params, mask=None, key=None, training=True):
         """
         Single transformer block: attention + FFN, each with residual and layer norm.
 
@@ -226,10 +230,21 @@ class Transformer:
         Returns:
             Output (batch, seq_len, d_model)
         """
-        attn_out = self.multi_head_attention(x, layer_params["attention"], mask)
+
+        k1, k2, k3 = jax.random.split(key, 3)
+
+        attn_out = self.multi_head_attention(x, layer_params["attention"], mask, k1, training)
+
+        if self.dropout_rate > 0 and training:
+            attn_out = self.dropout(attn_out, k2)
+
         x = self.layer_norm(x + attn_out, layer_params["norm1"])
 
         ff_out = self.feed_forward(x, layer_params["ffn"])
+        
+        if self.dropout_rate > 0 and training:
+            ff_out = self.dropout(ff_out, k3)
+
         x = self.layer_norm(x + ff_out, layer_params["norm2"])
         return x
 
@@ -369,7 +384,7 @@ class Transformer:
         except Exception as e:
             return False, f"Error during validation: {str(e)}"
 
-    def forward(self, params, input_tokens):
+    def forward(self, params, input_tokens, key, training=True):
         # Input:
 
         # params: Your dictionary of weights.
@@ -386,10 +401,18 @@ class Transformer:
         seq_len = x.shape[1]
         x = x + pe[:seq_len, :]
 
+        k_emb, k_layers = jax.random.split(key)
+        
+        k_layers = jax.random.split(k_layers, self.num_layers)
+
+
+        if self.dropout_rate > 0 and training:
+            x = self.dropout(x=x, key=k_emb)
+
         causal_mask = self.make_causal_mask(seq_len)
 
-        for layer_params in params['layers']:
-            x = self.transformer_block(x, layer_params, causal_mask)
+        for i, layer_params in enumerate(params['layers']):
+            x = self.transformer_block(x, layer_params, causal_mask, k_layers[i], training)
 
         logits = jnp.matmul(x, params['W_vocab']) + params['b_vocab']
         return logits
@@ -414,7 +437,7 @@ class Transformer:
                 inputs_cond = inputs[:, -self.max_len:]
             
             # 2. Forward Pass
-            logits = self.forward(params, inputs_cond)
+            logits = self.forward(params, inputs_cond, key, training=False)
             # Focus on the last token: (Batch, Vocab)
             logits = logits[:, -1, :]
             
@@ -433,3 +456,9 @@ class Transformer:
             inputs = jnp.concatenate([inputs, next_token], axis=1)
             
         return inputs
+
+    def dropout(self, x, key):
+        dropout_mask = jax.random.bernoulli(key, p=1 - self.dropout_rate, shape=x.shape)
+        x = (x * dropout_mask) / (1.0 - self.dropout_rate)
+
+        return x

@@ -14,12 +14,12 @@ from src.models.transformer import Transformer
 # This should print something like: [MetalDevice(id=0, ...)]
 print(jax.devices())
 
-def loss_fn(params, model, inputs, targets):
+def loss_fn(params, model, inputs, targets, key):
     """
     Calculates the Cross-Entropy Loss for next-token prediction.
     """
     # 1. Forward Pass (Returns Logits)
-    logits = model.forward(params, inputs)
+    logits = model.forward(params, inputs, key, training=True)
     
     # 2. Log Softmax (Numerical stability)
     log_probs = jax.nn.log_softmax(logits)
@@ -57,10 +57,10 @@ def load_checkpoint(filename):
 
 # We freeze 'model' as a static argument so JAX doesn't trace the class instance
 @partial(jax.jit, static_argnames=['model'])
-def train_step(params, opt_state, model, inputs, targets):
+def train_step(params, opt_state, model, inputs, targets, key):
     
     # 1. Calculate Loss & Gradients
-    loss, grads = jax.value_and_grad(loss_fn)(params, model, inputs, targets)
+    loss, grads = jax.value_and_grad(loss_fn)(params, model, inputs, targets, key)
     
     # 2. Compute Updates (AdamW)
     updates, new_opt_state = optimizer.update(grads, opt_state, params)
@@ -68,7 +68,7 @@ def train_step(params, opt_state, model, inputs, targets):
     # 3. Apply Updates
     new_params = optax.apply_updates(params, updates)
     
-    return new_params, new_opt_state, loss
+    return new_params, new_opt_state, loss, key
 
 # --- 3. MAIN EXECUTION ---
 
@@ -95,11 +95,13 @@ if __name__ == "__main__":
         "d_model": 128,      # Embedding dimension
         "vocab_size": loader.vocab_size,
         "num_layers": 4,
-        "d_ff": 512          # Feed-forward hidden size
+        "d_ff": 512,          # Feed-forward hidden size
+        "dropout_rate": 0.1
     }
 
     # Initialize Model
     key = jax.random.PRNGKey(0)
+    key, init_key = jax.random.split(key)
     model = Transformer(**config)
     
     # Initialize Optimizer
@@ -109,7 +111,7 @@ if __name__ == "__main__":
     # --- B. INITIALIZATION / RESUME ---
     
     # Default initialization
-    params = model.init_params(key)
+    params = model.init_params(init_key)
     opt_state = optimizer.init(params)
     start_step = 0
     
@@ -139,7 +141,8 @@ if __name__ == "__main__":
         inputs, targets = loader.get_batch('train')
         
         # 2. Train Step
-        params, opt_state, loss_val = train_step(params, opt_state, model, inputs, targets)
+        key, step_key = jax.random.split(key)
+        params, opt_state, loss_val, _ = train_step(params, opt_state, model, inputs, targets, step_key)
         
         # 3. Logging
         if step % log_every == 0:
