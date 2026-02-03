@@ -43,7 +43,7 @@ class Transformer:
         Returns:
             dict: Nested dictionary containing all model parameters
         """
-        keys = jax.random.split(key, self.num_layers * 6 + 3)
+        keys = jax.random.split(key, self.num_layers * 6 + 5)
         key_idx = 0
 
         params = {}
@@ -56,6 +56,11 @@ class Transformer:
         params['W_vocab'] = self._xavier_he(keys[key_idx], (self.d_model, self.vocab_size))
         key_idx += 1
         params['b_vocab'] = jnp.zeros(self.vocab_size)
+
+        params['final_norm'] = {
+            'gamma': jnp.ones(self.d_model),
+            'beta': jnp.zeros(self.d_model)
+        }
 
         # Transformer layers
         params['layers'] = []
@@ -233,19 +238,24 @@ class Transformer:
 
         k1, k2, k3 = jax.random.split(key, 3)
 
-        attn_out = self.multi_head_attention(x, layer_params["attention"], mask, k1, training)
+        x_norm = self.layer_norm(x, layer_params["norm1"])
+
+        attn_out = self.multi_head_attention(x_norm, layer_params["attention"], mask, k1, training)
 
         if self.dropout_rate > 0 and training:
             attn_out = self.dropout(attn_out, k2)
+        
+        x += attn_out
 
-        x = self.layer_norm(x + attn_out, layer_params["norm1"])
+        x_norm = self.layer_norm(x, layer_params["norm2"])
 
-        ff_out = self.feed_forward(x, layer_params["ffn"])
+        ff_out = self.feed_forward(x_norm, layer_params["ffn"])
         
         if self.dropout_rate > 0 and training:
             ff_out = self.dropout(ff_out, k3)
 
-        x = self.layer_norm(x + ff_out, layer_params["norm2"])
+        x += ff_out
+        
         return x
 
     def positional_encoding(self, max_len, d_model):
@@ -414,7 +424,9 @@ class Transformer:
         for i, layer_params in enumerate(params['layers']):
             x = self.transformer_block(x, layer_params, causal_mask, k_layers[i], training)
 
-        logits = jnp.matmul(x, params['W_vocab']) + params['b_vocab']
+        x_norm = self.layer_norm(x, params["final_norm"])
+
+        logits = jnp.matmul(x_norm, params['W_vocab']) + params['b_vocab']
         return logits
     
     def make_causal_mask(self, seq_len):
