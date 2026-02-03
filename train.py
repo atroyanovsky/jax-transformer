@@ -181,7 +181,6 @@ if __name__ == "__main__":
                 context, 
                 max_new_tokens=100, 
                 key=gen_key,
-                top_k=40
             )
             
             decoded = loader.decode(output_ids[0].tolist())
