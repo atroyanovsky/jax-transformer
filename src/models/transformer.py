@@ -6,6 +6,7 @@ where the model learns to reproduce its input.
 """
 
 from re import S
+from functools import partial
 import jax.numpy as jnp
 import jax
 
@@ -438,36 +439,38 @@ class Transformer:
 
 
     def generate(self, params, inputs, max_new_tokens, temperature=1.0, key=None):
-        # We need a random key for sampling!
         if key is None:
             key = jax.random.PRNGKey(42)
-            
+
+        # JIT-compile the forward pass once (static shape, no recompilation)
+        @jax.jit
+        def _forward(params, buffer, key):
+            return self.forward(params, buffer, key, training=False)
+
+        batch_size = inputs.shape[0]
+        prompt_len = inputs.shape[1]
+
+        # Pre-allocate a fixed-size buffer so input shape never changes
+        buffer = jnp.zeros((batch_size, self.max_len), dtype=inputs.dtype)
+        start = min(prompt_len, self.max_len)
+        buffer = buffer.at[:, :start].set(inputs[:, -self.max_len:])
+        cur_len = start
+
         for _ in range(max_new_tokens):
-            # 1. Crop Context
-            inputs_cond = inputs
-            if inputs.shape[1] > self.max_len:
-                inputs_cond = inputs[:, -self.max_len:]
-            
-            # 2. Forward Pass
-            logits = self.forward(params, inputs_cond, key, training=False)
-            # Focus on the last token: (Batch, Vocab)
-            logits = logits[:, -1, :]
-            
-            # 3. Apply Temperature
-            # Higher T (e.g. 1.0) = More creative/random
-            # Lower T (e.g. 0.1) = More confident/conservative
-            logits = logits / temperature
-            
-            # 4. Sample instead of Argmax
+            logits = _forward(params, buffer, key)
+            logits = logits[:, cur_len - 1, :] / temperature
+
             key, subkey = jax.random.split(key)
-            # jax.random.categorical expects unnormalized logits (no softmax needed)
             next_token = jax.random.categorical(subkey, logits, axis=-1)
-            
-            # 5. Append
-            next_token = next_token.reshape(1, 1)
-            inputs = jnp.concatenate([inputs, next_token], axis=1)
-            
-        return inputs
+
+            if cur_len < self.max_len:
+                buffer = buffer.at[:, cur_len].set(next_token)
+                cur_len += 1
+            else:
+                buffer = jnp.roll(buffer, -1, axis=1)
+                buffer = buffer.at[:, -1].set(next_token)
+
+        return buffer[:, :cur_len]
 
     def dropout(self, x, key):
         dropout_mask = jax.random.bernoulli(key, p=1 - self.dropout_rate, shape=x.shape)
